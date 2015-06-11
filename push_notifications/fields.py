@@ -73,7 +73,7 @@ class HexIntegerField(six.with_metaclass(models.SubfieldBase, models.BigIntegerF
 			return ""
 		# on postgres only, re-interpret from signed to unsigned
 		if connection.settings_dict["ENGINE"] in postgres_engines:
-			value = hex(struct.unpack("Q", struct.pack("q", value))[0])
+			value = struct.unpack("Q", struct.pack("q", value))[0]
 		return value
 
 	def formfield(self, **kwargs):
