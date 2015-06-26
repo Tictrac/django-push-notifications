@@ -1,6 +1,7 @@
 # python compiled
 __pycache__
 *.pyc
+*.egg-info
 
 # distutils
 MANIFEST

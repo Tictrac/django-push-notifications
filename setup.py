@@ -39,4 +39,8 @@ setup(
 	long_description=README,
 	url="https://github.com/jleclanche/django-push-notifications",
 	version=push_notifications.__version__,
+	install_requires=[
+		'django-uuidfield',
+		'django',
+	],
 )
