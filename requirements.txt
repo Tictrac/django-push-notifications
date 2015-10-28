@@ -1,2 +1,4 @@
 Django
 django-uuidfield
+requests==2.8.1
+mock

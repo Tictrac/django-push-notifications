@@ -44,5 +44,6 @@ setup(
 	install_requires=[
 		'django-uuidfield',
 		'django',
+		'requests==2.8.1',
 	],
 )

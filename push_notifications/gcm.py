@@ -6,13 +6,12 @@ https://developer.android.com/google/gcm/index.html
 """
 
 import json
+import requests
 
 try:
-	from urllib.request import Request, urlopen
 	from urllib.parse import urlencode
 except ImportError:
 	# Python 2 support
-	from urllib2 import Request, urlopen
 	from urllib import urlencode
 
 from django.core.exceptions import ImproperlyConfigured
@@ -33,18 +32,18 @@ def _chunks(l, n):
 
 
 def _gcm_send(data, content_type):
-	key = SETTINGS.get("GCM_API_KEY")
-	if not key:
-		raise ImproperlyConfigured('You need to set PUSH_NOTIFICATIONS_SETTINGS["GCM_API_KEY"] to send messages through GCM.')
+    key = SETTINGS.get("GCM_API_KEY")
+    if not key:
+        raise ImproperlyConfigured(
+            'You need to set PUSH_NOTIFICATIONS_SETTINGS["GCM_API_KEY"] to send messages through GCM.')
 
-	headers = {
-		"Content-Type": content_type,
-		"Authorization": "key=%s" % (key),
-		"Content-Length": str(len(data)),
-	}
+    headers = {
+        "Content-Type": content_type,
+        "Authorization": "key=%s" % (key),
+        "Content-Length": str(len(data)),
+    }
 
-	request = Request(SETTINGS["GCM_POST_URL"], data, headers)
-	return urlopen(request).read()
+    return requests.post(SETTINGS["GCM_POST_URL"], data, headers=headers).text.decode("utf-8")
 
 
 def _gcm_send_plain(registration_id, data, collapse_key=None, delay_while_idle=False, time_to_live=0):
@@ -67,7 +66,7 @@ def _gcm_send_plain(registration_id, data, collapse_key=None, delay_while_idle=F
 		values["time_to_live"] = time_to_live
 
 	for k, v in data.items():
-		values["data.%s" % (k)] = v.encode("utf-8")
+		values["data.%s" % (k)] = str(v).encode("utf-8")
 
 	data = urlencode(sorted(values.items())).encode("utf-8")  # sorted items for tests
 
