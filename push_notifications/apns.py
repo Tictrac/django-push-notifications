@@ -4,6 +4,7 @@ Documentation is available on the iOS Developer Library:
 https://developer.apple.com/library/ios/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/Chapters/ApplePushService.html
 """
 
+import codecs
 import json
 import ssl
 import struct
@@ -14,6 +15,21 @@ from binascii import unhexlify
 from django.core.exceptions import ImproperlyConfigured
 from . import NotificationError
 from .settings import PUSH_NOTIFICATIONS_SETTINGS as SETTINGS
+
+
+APNS_ERROR_MESSAGES = {
+	1: "Processing error",
+	2: "Missing device token",
+	3: "Missing topic",
+	4: "Missing payload",
+	5: "Invalid token size",
+	6: "Invalid topic size",
+	7: "Invalid payload size",
+	8: "Invalid token",
+	10: "Shutdown",
+	128: "Protocol error (APNS could not parse notification)",
+	255: "Unknown APNS error",
+}
 
 
 class APNSError(NotificationError):
@@ -31,8 +47,24 @@ class APNSDataOverflow(APNSError):
 	pass
 
 
-def _apns_create_socket(address_tuple):
-	certfile = SETTINGS.get("APNS_CERTIFICATE")
+def _check_certificate(ss):
+	mode = "start"
+	for s in ss.split("\n"):
+		if mode == "start":
+			if "BEGIN RSA PRIVATE KEY" in s:
+				mode = "key"
+		elif mode == "key":
+			if "END RSA PRIVATE KEY" in s:
+				mode = "end"
+				break
+			elif s.startswith("Proc-Type") and "ENCRYPTED" in s:
+				raise Exception("The certificate private key should not be encrypted")
+	if mode != "end":
+		raise Exception("The certificate doesn't contain a private key")
+
+
+def _apns_create_socket(address_tuple, certfile=None):
+	certfile = certfile or SETTINGS.get("APNS_CERTIFICATE")
 	if not certfile:
 		raise ImproperlyConfigured(
 			'You need to set PUSH_NOTIFICATIONS_SETTINGS["APNS_CERTIFICATE"] to send messages through APNS.'
@@ -40,29 +72,37 @@ def _apns_create_socket(address_tuple):
 
 	try:
 		with open(certfile, "r") as f:
-			f.read()
+			content = f.read()
 	except Exception as e:
 		raise ImproperlyConfigured("The APNS certificate file at %r is not readable: %s" % (certfile, e))
 
+	try:
+		_check_certificate(content)
+	except Exception as e:
+		raise ImproperlyConfigured("The APNS certificate file at %r is unusable: %s" % (certfile, e))
+
+	ca_certs = SETTINGS.get("APNS_CA_CERTIFICATES")
+
 	sock = socket.socket()
-	sock = ssl.wrap_socket(sock, ssl_version=ssl.PROTOCOL_TLSv1, certfile=certfile)
+	sock = ssl.wrap_socket(sock, ssl_version=ssl.PROTOCOL_TLSv1, certfile=certfile, ca_certs=ca_certs)
 	sock.connect(address_tuple)
 
 	return sock
 
 
-def _apns_create_socket_to_push():
-	return _apns_create_socket((SETTINGS["APNS_HOST"], SETTINGS["APNS_PORT"]))
+def _apns_create_socket_to_push(certfile=None):
+	return _apns_create_socket((SETTINGS["APNS_HOST"], SETTINGS["APNS_PORT"]), certfile)
 
 
-def _apns_create_socket_to_feedback():
-	return _apns_create_socket((SETTINGS["APNS_FEEDBACK_HOST"], SETTINGS["APNS_FEEDBACK_PORT"]))
+def _apns_create_socket_to_feedback(certfile=None):
+	return _apns_create_socket((SETTINGS["APNS_FEEDBACK_HOST"], SETTINGS["APNS_FEEDBACK_PORT"]), certfile)
 
 
 def _apns_pack_frame(token_hex, payload, identifier, expiration, priority):
 	token = unhexlify(token_hex)
 	# |COMMAND|FRAME-LEN|{token}|{payload}|{id:4}|{expiration:4}|{priority:1}
-	frame_len = 3 * 5 + len(token) + len(payload) + 4 + 4 + 1  # 5 items, each 3 bytes prefix, then each item length
+	# 5 items, each 3 bytes prefix, then each item length
+	frame_len = 3 * 5 + len(token) + len(payload) + 4 + 4 + 1
 	frame_fmt = "!BIBH%ssBH%ssBHIBHIBHB" % (len(token), len(payload))
 	frame = struct.pack(
 		frame_fmt,
@@ -71,7 +111,8 @@ def _apns_pack_frame(token_hex, payload, identifier, expiration, priority):
 		2, len(payload), payload,
 		3, 4, identifier,
 		4, 4, expiration,
-		5, 1, priority)
+		5, 1, priority
+	)
 
 	return frame
 
@@ -99,9 +140,11 @@ def _apns_check_errors(sock):
 		sock.settimeout(saved_timeout)
 
 
-def _apns_send(token, alert, badge=None, sound=None, category=None, content_available=False,
+def _apns_send(
+	token, alert, badge=None, sound=None, category=None, content_available=False,
 	action_loc_key=None, loc_key=None, loc_args=[], extra={}, identifier=0,
-	expiration=None, priority=10, socket=None):
+	expiration=None, priority=10, socket=None, certfile=None
+):
 	data = {}
 	aps_data = {}
 
@@ -118,6 +161,8 @@ def _apns_send(token, alert, badge=None, sound=None, category=None, content_avai
 		aps_data["alert"] = alert
 
 	if badge is not None:
+		if callable(badge):
+			badge = badge(token)
 		aps_data["badge"] = badge
 
 	if sound is not None:
@@ -147,9 +192,11 @@ def _apns_send(token, alert, badge=None, sound=None, category=None, content_avai
 	if socket:
 		socket.write(frame)
 	else:
-		with closing(_apns_create_socket_to_push()) as socket:
+		with closing(_apns_create_socket_to_push(certfile)) as socket:
 			socket.write(frame)
 			_apns_check_errors(socket)
+
+	return token
 
 
 def _apns_read_and_unpack(socket, data_format):
@@ -165,7 +212,7 @@ def _apns_receive_feedback(socket):
 	expired_token_list = []
 
 	# read a timestamp (4 bytes) and device token length (2 bytes)
-	header_format = '!LH'
+	header_format = "!LH"
 	has_data = True
 	while has_data:
 		try:
@@ -174,7 +221,7 @@ def _apns_receive_feedback(socket):
 			if header_data is not None:
 				timestamp, token_length = header_data
 				# Unpack format for a single value of length bytes
-				token_format = '%ss' % token_length
+				token_format = "%ss" % token_length
 				device_token = _apns_read_and_unpack(socket, token_format)
 				if device_token is not None:
 					# _apns_read_and_unpack returns a tuple, but
@@ -203,7 +250,7 @@ def apns_send_message(registration_id, alert, **kwargs):
 	to this for silent notifications.
 	"""
 
-	_apns_send(registration_id, alert, **kwargs)
+	return _apns_send(registration_id, alert, **kwargs)
 
 
 def apns_send_bulk_message(registration_ids, alert, **kwargs):
@@ -215,21 +262,23 @@ def apns_send_bulk_message(registration_ids, alert, **kwargs):
 	it won't be included in the notification. You will need to pass None
 	to this for silent notifications.
 	"""
-	with closing(_apns_create_socket_to_push()) as socket:
+	certfile = kwargs.get("certfile", None)
+	with closing(_apns_create_socket_to_push(certfile)) as socket:
 		for identifier, registration_id in enumerate(registration_ids):
-			_apns_send(registration_id, alert, identifier=identifier, socket=socket, **kwargs)
+			res = _apns_send(registration_id, alert, identifier=identifier, socket=socket, **kwargs)
 		_apns_check_errors(socket)
+		return res
 
 
-def apns_fetch_inactive_ids():
+def apns_fetch_inactive_ids(certfile=None):
 	"""
 	Queries the APNS server for id's that are no longer active since
 	the last fetch
 	"""
-	with closing(_apns_create_socket_to_feedback()) as socket:
+	with closing(_apns_create_socket_to_feedback(certfile)) as socket:
 		inactive_ids = []
 		# Maybe we should have a flag to return the timestamp?
 		# It doesn't seem that useful right now, though.
-		for tStamp, registration_id in _apns_receive_feedback(socket):
-			inactive_ids.append(registration_id.encode('hex'))
+		for ts, registration_id in _apns_receive_feedback(socket):
+			inactive_ids.append(codecs.encode(registration_id, "hex_codec"))
 		return inactive_ids

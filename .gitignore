@@ -1,6 +1,7 @@
 # python compiled
 __pycache__
 *.pyc
+*.egg-info
 
 # distutils
 MANIFEST
@@ -12,3 +13,6 @@ build
 
 # virtualenv
 .env
+
+# tox
+.tox
