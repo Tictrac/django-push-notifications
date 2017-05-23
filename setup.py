@@ -39,7 +39,6 @@ setup(
 	version=push_notifications.__version__,
 	install_requires=[
 		'django-uuidfield',
-		'django',
-		'requests==2.8.1',
+		'django'
 	],
 )
